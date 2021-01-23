@@ -72,6 +72,7 @@ We run the benchmark for both sorted and unsorted graph and print results for un
 3. FA + Unsorted -> FA + dynamic + Unsorted
 4. FA + Sorting + Atomic -> FA + atomic + sorted
 5. FA + Sorting + dynamic -> FA + dynamic + sorted
+
 , where on arrow's left is the notation used in paper and the right is benchmark setting.
 
 ## Play around
