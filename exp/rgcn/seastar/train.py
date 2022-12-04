@@ -154,13 +154,50 @@ class EGLRGCNModel(nn.Module):
         h = self.layer2.forward(g, h, edge_type, edge_norm)
         return h
 
+class EGLRGCNModelLayer1(nn.Module):
+    def __init__(self, num_nodes, hidden_dim, out_dim, num_rels, num_edges, num_bases, dropout, activation):
+        super(EGLRGCNModelLayer1, self).__init__()
+        self.layer1 = EglRelGraphConv(num_nodes,
+                                 hidden_dim,
+                                 num_rels,
+                                 num_edges,
+                                 num_bases=num_bases,
+                                 dropout=dropout,
+                                 activation=activation,
+                                 layer_type=0)
+        
+    def forward(self, g, feats, edge_type, edge_norm):
+        h = self.layer1.forward(g, feats, edge_type, edge_norm)
+        return h
+
+class EGLRGCNModelLayer2(nn.Module):
+    def __init__(self, num_nodes, hidden_dim, out_dim, num_rels, num_edges, num_bases, dropout, activation):
+        super(EGLRGCNModelLayer2, self).__init__()
+        self.layer2 = EglRelGraphConv(hidden_dim,
+                                 out_dim,
+                                 num_rels,
+                                 num_edges,
+                                 num_bases=num_bases,
+                                 dropout=dropout,
+                                 activation=activation,
+                                 layer_type=1)
+        
+    def forward(self, g, h, edge_type, edge_norm):
+        h = self.layer2.forward(g, h, edge_type, edge_norm)
+        return h
+
 def main(args):
     # load graph data
     data = load_data(args.dataset, bfs_level=args.bfs_level, relabel=args.relabel)
     num_nodes = data.num_nodes
     num_rels = data.num_rels
-    num_classes = data.num_classes
-    labels = data.labels
+    
+    if args.override_num_classes:
+        num_classes = args.num_classes
+        labels = th.randint(0, num_classes, (num_nodes,)).numpy()
+    else:
+        num_classes = data.num_classes
+        labels = data.labels
     train_idx = data.train_idx
     test_idx = data.test_idx
 
@@ -216,7 +253,16 @@ def main(args):
     #r_forward = compute_e_to_distict_t(tu_forward)
     #r_backward = compute_e_to_distict_t(tu_backward)
     #print('ratio forward:', r_forward, 'ratio_backward:', r_backward)
-    model = EGLRGCNModel(num_nodes,
+    model_layer1 = EGLRGCNModelLayer1(num_nodes,
+                        args.hidden_size,
+                        num_classes,
+                        num_rels,
+                        edge_type.size(0),
+                        num_bases=args.num_bases,
+                        activation=F.relu,
+                        dropout=args.dropout)
+    
+    model_layer2 = EGLRGCNModelLayer2(num_nodes,
                         args.hidden_size,
                         num_classes,
                         num_rels,
@@ -226,22 +272,27 @@ def main(args):
                         dropout=args.dropout)
 
     if use_cuda:
-        model.cuda()
+        model_layer1.cuda()
+        model_layer2.cuda()
 
     # optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2norm)
+    parameters = list(model_layer1.parameters()) + list(model_layer2.parameters())
+    optimizer = torch.optim.Adam(parameters, lr=args.lr, weight_decay=args.l2norm)
 
     # training loop
     print("start training...")
     forward_time = []
     backward_time = []
-    model.train()
+    model_layer1.train()
+    model_layer2.train()
     train_labels=labels[train_idx]
     train_idx = list(train_idx)
     for epoch in range(args.num_epochs):
         optimizer.zero_grad()
+        h = model_layer1(g, feats, edge_type, edge_norm)
+        torch.cuda.synchronize()
         t0 = time.time()
-        logits = model(g, feats, edge_type, edge_norm)
+        logits = model_layer2(g, h, edge_type, edge_norm)
         tb = time.time()
         train_logits=logits[train_idx]
         ta = time.time()
@@ -263,15 +314,15 @@ def main(args):
               format(train_acc, loss.item(), val_acc, val_loss.item()))
     print('max memory allocated', torch.cuda.max_memory_allocated())
 
-    model.eval()
-    logits = model.forward(g, feats, edge_type, edge_norm)
-    test_loss = F.cross_entropy(logits[test_idx], labels[test_idx])
-    test_acc = torch.sum(logits[test_idx].argmax(dim=1) == labels[test_idx]).item() / len(test_idx)
-    print("Test Accuracy: {:.4f} | Test loss: {:.4f}".format(test_acc, test_loss.item()))
+    #model.eval()
+    #logits = model.forward(g, feats, edge_type, edge_norm)
+    #test_loss = F.cross_entropy(logits[test_idx], labels[test_idx])
+    #test_acc = torch.sum(logits[test_idx].argmax(dim=1) == labels[test_idx]).item() / len#(test_idx)
+    #print("Test Accuracy: {:.4f} | Test loss: {:.4f}".format(test_acc, test_loss.item()))
     print()
 
-    print("Mean forward time: {:4f}".format(np.mean(forward_time[len(forward_time) // 4:])))
-    print("Mean backward time: {:4f}".format(np.mean(backward_time[len(backward_time) // 4:])))
+    print("Mean forward time: {:4f} ms".format(np.mean(forward_time[len(forward_time) // 4:]) * 1000))
+    print("Mean backward time: {:4f} ms".format(np.mean(backward_time[len(backward_time) // 4:])*1000))
 
     Used_memory = torch.cuda.max_memory_allocated(0)/(1024**3)
     avg_run_time = np.mean(forward_time[len(forward_time) // 4:]) + np.mean(backward_time[len(backward_time) // 4:])
@@ -293,6 +344,8 @@ if __name__ == '__main__':
             help="number of filter weight matrices, default: -1 [use all]")
     parser.add_argument("--n-layers", type=int, default=2,
             help="number of propagation rounds")
+    parser.add_argument("--override_num_classes", action = "store_true", default=False)
+    parser.add_argument("--num_classes", type=int, default=0)
     parser.add_argument("-e", "--num_epochs", type=int, default=50,
             help="number of training epochs")
     parser.add_argument("-d", "--dataset", type=str, required=True,
