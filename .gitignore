@@ -2,3 +2,4 @@
 __pycache__/
 egl_kernel.*
 *.svg
+*.egg-info/
