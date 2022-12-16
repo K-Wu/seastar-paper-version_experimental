@@ -69,7 +69,7 @@ class EglRelGraphConv(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
 
-    def forward(self, g, x, etypes, norm=None):
+    def forward(self, g, x, norm=None):
         """ Forward computation
 
         Parameters
@@ -149,9 +149,9 @@ class EGLRGCNModel(nn.Module):
                                  activation=activation,
                                  layer_type=1)
         
-    def forward(self, g, feats, edge_type, edge_norm):
-        h = self.layer1.forward(g, feats, edge_type, edge_norm)
-        h = self.layer2.forward(g, h, edge_type, edge_norm)
+    def forward(self, g, feats, edge_norm):
+        h = self.layer1.forward(g, feats, edge_norm)
+        h = self.layer2.forward(g, h,  edge_norm)
         return h
 
 class EGLRGCNModelLayer1(nn.Module):
@@ -166,8 +166,8 @@ class EGLRGCNModelLayer1(nn.Module):
                                  activation=activation,
                                  layer_type=0)
         
-    def forward(self, g, feats, edge_type, edge_norm):
-        h = self.layer1.forward(g, feats, edge_type, edge_norm)
+    def forward(self, g, feats, edge_norm):
+        h = self.layer1.forward(g, feats, edge_norm)
         return h
 
 class EGLRGCNModelLayer2(nn.Module):
@@ -182,77 +182,63 @@ class EGLRGCNModelLayer2(nn.Module):
                                  activation=activation,
                                  layer_type=1)
         
-    def forward(self, g, h, edge_type, edge_norm):
-        h = self.layer2.forward(g, h, edge_type, edge_norm)
+    def forward(self, g, h, edge_norm):
+        h = self.layer2.forward(g, h, edge_norm)
         return h
 
 def main(args):
-    # load graph data
-    data = load_data(args.dataset, bfs_level=args.bfs_level, relabel=args.relabel)
-    num_nodes = data.num_nodes
-    num_rels = data.num_rels
+    def seastar_legacy_rgcn_load_data(args):
+            # load graph data
+            data = load_data(args.dataset, bfs_level=args.bfs_level, relabel=args.relabel)
+            num_nodes = data.num_nodes
+            num_rels = data.num_rels
+            
+            if args.override_num_classes:
+                num_classes = args.num_classes
+                labels = th.randint(0, num_classes, (num_nodes,)).numpy()
+            else:
+                num_classes = data.num_classes
+                labels = data.labels
+            train_idx = data.train_idx
+            test_idx = data.test_idx
+
+            # split dataset into train, validate, test
+            if args.validation:
+                val_idx = train_idx[:len(train_idx) // 5]
+                train_idx = train_idx[len(train_idx) // 5:]
+            else:
+                val_idx = train_idx
+
+            # since the nodes are featureless, the input feature is then the node id.
+            feats = torch.arange(num_nodes)
+
+            # edge type and normalization factor
+            edge_type = torch.from_numpy(data.edge_type).long()
+            edge_norm = torch.from_numpy(data.edge_norm).unsqueeze(1).float()
+            labels = torch.from_numpy(labels).view(-1).long()
+
+            # check cuda
+            use_cuda = args.gpu >= 0 and torch.cuda.is_available()
+            if use_cuda:
+                torch.cuda.set_device(args.gpu)
+                feats = feats.cuda()
+                edge_type = edge_type.cuda()
+                edge_norm = edge_norm.cuda()
+                labels = labels.cuda()
+
+            # create graph
+            g = DGLGraph()
+            g.add_nodes(num_nodes)
+            g.add_edges_with_type(data.edge_src, data.edge_dst, data.edge_type)
+            return g, feats, edge_type, edge_norm, labels, num_classes, train_idx, val_idx, test_idx
     
-    if args.override_num_classes:
-        num_classes = args.num_classes
-        labels = th.randint(0, num_classes, (num_nodes,)).numpy()
-    else:
-        num_classes = data.num_classes
-        labels = data.labels
-    train_idx = data.train_idx
-    test_idx = data.test_idx
+    def load_data_from_graphiler_dgl_graph(args):
+        from setup_lite_softlink import load_data_as_dgl_graph
+        g = load_data_as_dgl_graph(args.dataset)
+        edge_type_num = len()
 
-    # split dataset into train, validate, test
-    if args.validation:
-        val_idx = train_idx[:len(train_idx) // 5]
-        train_idx = train_idx[len(train_idx) // 5:]
-    else:
-        val_idx = train_idx
+        return g, feats, edge_type_num, edge_norm, labels, args.num_classes
 
-    # since the nodes are featureless, the input feature is then the node id.
-    feats = torch.arange(num_nodes)
-
-    # edge type and normalization factor
-    edge_type = torch.from_numpy(data.edge_type).long()
-    edge_norm = torch.from_numpy(data.edge_norm).unsqueeze(1).float()
-    labels = torch.from_numpy(labels).view(-1).long()
-
-    # check cuda
-    use_cuda = args.gpu >= 0 and torch.cuda.is_available()
-    if use_cuda:
-        torch.cuda.set_device(args.gpu)
-        feats = feats.cuda()
-        edge_type = edge_type.cuda()
-        edge_norm = edge_norm.cuda()
-        labels = labels.cuda()
-
-    # create graph
-    g = DGLGraph()
-    g.add_nodes(num_nodes)
-    g.add_edges_with_type(data.edge_src, data.edge_dst, data.edge_type)
-    #tu_forward = sorted(list(zip(data.edge_src, data.edge_dst, data.edge_type)), key=lambda x : (x[1], x[2]))
-    #tu_backward = sorted(list(zip(data.edge_dst, data.edge_src,  data.edge_type)), key=lambda x : (x[1], x[2]))
-    #def compute_e_to_distict_t(tu):
-    #    num_edges = len(tu)
-    #    all_node_distinct_types = 0
-    #    cur_node = tu[0][1]
-    #    type_set = set()
-    #    type_set.add(tu[0][2])
-    #    for i in range(1, len(tu)):
-    #        if tu[i][1] == cur_node:
-    #            type_set.add(tu[i][2])
-    #        else:
-    #            all_node_distinct_types += len(type_set)
-    #            cur_node = tu[i][1]
-    #            type_set.clear()
-    #            type_set.add(tu[i][2])
-    #    all_node_distinct_types += len(type_set)
-    #    type_set.clear()
-    #    #print('\n'.join([str(t) for t in tu]))
-    #    print('num_edges:', num_edges, 'node distinct types', all_node_distinct_types)
-    #    return num_edges/all_node_distinct_types
-    #r_forward = compute_e_to_distict_t(tu_forward)
-    #r_backward = compute_e_to_distict_t(tu_backward)
-    #print('ratio forward:', r_forward, 'ratio_backward:', r_backward)
     model_layer1 = EGLRGCNModelLayer1(num_nodes,
                         args.hidden_size,
                         num_classes,
@@ -289,10 +275,10 @@ def main(args):
     train_idx = list(train_idx)
     for epoch in range(args.num_epochs):
         optimizer.zero_grad()
-        h = model_layer1(g, feats, edge_type, edge_norm)
+        h = model_layer1(g, feats, edge_norm)
         torch.cuda.synchronize()
         t0 = time.time()
-        logits = model_layer2(g, h, edge_type, edge_norm)
+        logits = model_layer2(g, h, edge_norm)
         tb = time.time()
         train_logits=logits[train_idx]
         ta = time.time()
@@ -308,10 +294,10 @@ def main(args):
             print("Epoch {:05d} | Train Forward Time(s) {:.4f} | Backward Time(s) {:.4f}".
                   format(epoch, forward_time[-1], backward_time[-1]))
         train_acc = torch.sum(logits[train_idx].argmax(dim=1) == labels[train_idx]).item() / len(train_idx)
-        val_loss = F.cross_entropy(logits[val_idx], labels[val_idx])
-        val_acc = torch.sum(logits[val_idx].argmax(dim=1) == labels[val_idx]).item() / len(val_idx)
-        print("Train Accuracy: {:.4f} | Train Loss: {:.4f} | Validation Accuracy: {:.4f} | Validation loss: {:.4f}".
-              format(train_acc, loss.item(), val_acc, val_loss.item()))
+        #val_loss = F.cross_entropy(logits[val_idx], labels[val_idx])
+        #val_acc = torch.sum(logits[val_idx].argmax(dim=1) == labels[val_idx]).item() / len(val_idx)
+        #print("Train Accuracy: {:.4f} | Train Loss: {:.4f} | Validation Accuracy: {:.4f} | Validation loss: {:.4f}".
+        #      format(train_acc, loss.item(), val_acc, val_loss.item()))
     print('max memory allocated', torch.cuda.max_memory_allocated())
 
     #model.eval()
@@ -319,7 +305,6 @@ def main(args):
     #test_loss = F.cross_entropy(logits[test_idx], labels[test_idx])
     #test_acc = torch.sum(logits[test_idx].argmax(dim=1) == labels[test_idx]).item() / len#(test_idx)
     #print("Test Accuracy: {:.4f} | Test loss: {:.4f}".format(test_acc, test_loss.item()))
-    print()
 
     print("Mean forward time: {:4f} ms".format(np.mean(forward_time[len(forward_time) // 4:]) * 1000))
     print("Mean backward time: {:4f} ms".format(np.mean(backward_time[len(backward_time) // 4:])*1000))
